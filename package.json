@@ -1,6 +1,6 @@
 {
 	"name": "atlassian-driftguard-forge",
-	"version": "1.0.0",
+	"version": "3.0.0",
 	"description": "DriftGuard AI: Rovo Autonomous Spec & Release Drift Auditor for Atlassian Forge",
 	"author": "Le Nguyen Trong Tinh",
 	"license": "MIT",
@@ -12,6 +12,9 @@
 		"test": "vitest run"
 	},
 	"dependencies": {
+		"@forge/api": "^8.5.1",
+		"@forge/bridge": "^7.4.0",
+		"@forge/storage": "^2.0.3",
 		"react": "^18.3.1",
 		"react-dom": "^18.3.1",
 		"yaml": "^2.7.0"

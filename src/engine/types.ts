@@ -86,3 +86,22 @@ export interface ScenarioDataset {
 	spec: SpecDocument;
 	ticket: JiraTicket;
 }
+
+export interface CustomScenarioInput {
+	specId?: string;
+	specTitle?: string;
+	specContent: string;
+	specRequirements?: string[];
+	ticketKey?: string;
+	ticketSummary?: string;
+	ticketStatus?: "To Do" | "In Progress" | "In Review" | "Done";
+	ticketAssignee?: string;
+	acceptanceCriteria: string[];
+	subtasks?: string[];
+}
+
+export interface ForgeEnvironmentStatus {
+	isForge: boolean;
+	context: any | null;
+	source: "FORGE_CLOUD" | "STANDALONE_SANDBOX";
+}

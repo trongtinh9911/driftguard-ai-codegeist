@@ -62,4 +62,29 @@ describe("Atlassian Rovo Actions & Resolver Handlers", () => {
 		});
 		expect(errRes.error).toBeDefined();
 	});
+
+	it("exposes client mode and records audit history via Forge resolver", async () => {
+		const modeRes = await resolverHandler({
+			call: { functionKey: "getClientMode", payload: {} },
+		});
+		expect(modeRes.isLiveForge).toBe(false);
+		expect(modeRes.source).toBe("STANDALONE_FALLBACK");
+
+		await resolverHandler({
+			call: {
+				functionKey: "auditDrift",
+				payload: { scenarioId: "scenario-fintech" },
+			},
+		});
+
+		const history = await resolverHandler({
+			call: {
+				functionKey: "getAuditHistory",
+				payload: { ticketKey: "FIN-104" },
+			},
+		});
+		expect(Array.isArray(history)).toBe(true);
+		expect(history.length).toBeGreaterThan(0);
+		expect(history[0].ticketKey).toBe("FIN-104");
+	});
 });

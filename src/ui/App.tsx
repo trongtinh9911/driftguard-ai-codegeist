@@ -1,10 +1,29 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
 	auditSpecTicketDrift,
 	reconcileTicketDrift,
 } from "../engine/driftEngine";
+import { detectForgeEnvironment } from "../engine/forgeBridge";
 import { SCENARIOS } from "../engine/mockData";
-import type { DriftItem, ScenarioDataset } from "../engine/types";
+import type {
+	DriftItem,
+	ForgeEnvironmentStatus,
+	ScenarioDataset,
+} from "../engine/types";
+import CustomLiveTester from "./CustomLiveTester";
+import {
+	CUSTOM_TESTER_PRESETS,
+	type CustomPrdDraft,
+	type CustomTicketDraft,
+	evaluateCustomDrafts,
+	ticketToCustomDraft,
+} from "./customParser";
+import {
+	buildReportFilename,
+	createJsonAuditExport,
+	createMarkdownAuditExport,
+	downloadTextFile,
+} from "./reportExport";
 
 interface ChatMessage {
 	id: string;
@@ -19,6 +38,10 @@ interface ChatMessage {
 	timestamp: string;
 }
 
+const CUSTOM_MODE_ID = "custom-live-tester";
+
+type ActiveTab = "matrix" | "context" | "rovo" | "tester";
+
 export default function App() {
 	const [selectedScenarioId, setSelectedScenarioId] =
 		useState<string>("scenario-fintech");
@@ -32,16 +55,65 @@ export default function App() {
 		return initial;
 	});
 
-	const [activeTab, setActiveTab] = useState<"matrix" | "context" | "rovo">(
-		"matrix",
+	// Custom PRD & Jira Ticket Live Tester State
+	const [activePresetId, setActivePresetId] = useState<string | null>(
+		CUSTOM_TESTER_PRESETS[0].id,
 	);
-	const [copiedReport, setCopiedReport] = useState(false);
+	const [customPrdDraft, setCustomPrdDraft] = useState<CustomPrdDraft>(() => ({
+		...CUSTOM_TESTER_PRESETS[0].prd,
+	}));
+	const [customTicketDraft, setCustomTicketDraft] = useState<CustomTicketDraft>(
+		() => ({
+			...CUSTOM_TESTER_PRESETS[0].ticket,
+		}),
+	);
 
-	// Current Scenario & Audit
-	const currentScenario = scenariosState[selectedScenarioId];
+	// Forge Cloud vs Interactive Sandbox Detection
+	const [envStatus, setEnvStatus] = useState<ForgeEnvironmentStatus>({
+		isForge: false,
+		context: null,
+		source: "STANDALONE_SANDBOX",
+	});
+
+	useEffect(() => {
+		let cancelled = false;
+		detectForgeEnvironment().then((status) => {
+			if (!cancelled) {
+				setEnvStatus(status);
+			}
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	const [activeTab, setActiveTab] = useState<ActiveTab>("matrix");
+	const [exportFeedback, setExportFeedback] = useState<
+		"md" | "json" | "copy" | null
+	>(null);
+
+	const isCustomMode = selectedScenarioId === CUSTOM_MODE_ID;
+
+	// Real-time Custom Evaluation
+	const customEvaluation = useMemo(
+		() => evaluateCustomDrafts(customPrdDraft, customTicketDraft),
+		[customPrdDraft, customTicketDraft],
+	);
+
+	// Unified Active Spec, Ticket & Audit Result
+	const activeSpec = isCustomMode
+		? customEvaluation.spec
+		: scenariosState[selectedScenarioId].spec;
+	const activeTicket = isCustomMode
+		? customEvaluation.ticket
+		: scenariosState[selectedScenarioId].ticket;
+
 	const auditResult = useMemo(() => {
-		return auditSpecTicketDrift(currentScenario.spec, currentScenario.ticket);
-	}, [currentScenario]);
+		if (isCustomMode) {
+			return customEvaluation.auditResult;
+		}
+		return auditSpecTicketDrift(activeSpec, activeTicket);
+	}, [isCustomMode, customEvaluation, activeSpec, activeTicket]);
 
 	// Rovo Chat Simulator State
 	const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -54,11 +126,38 @@ export default function App() {
 	]);
 	const [inputPrompt, setInputPrompt] = useState("");
 
-	// Handlers
+	const flashExportFeedback = (kind: "md" | "json" | "copy") => {
+		setExportFeedback(kind);
+		setTimeout(() => {
+			setExportFeedback((prev) => (prev === kind ? null : prev));
+		}, 2400);
+	};
+
+	// Scenario / Mode switching
+	const handleScenarioChange = (nextId: string) => {
+		setSelectedScenarioId(nextId);
+		if (nextId === CUSTOM_MODE_ID) {
+			setActiveTab("tester");
+		} else if (activeTab === "tester") {
+			setActiveTab("matrix");
+		}
+	};
+
+	const handleSelectTab = (tab: ActiveTab) => {
+		setActiveTab(tab);
+		if (tab === "tester") {
+			setSelectedScenarioId(CUSTOM_MODE_ID);
+		}
+	};
+
+	// Reconciliation Handlers (work for both built-in scenarios & Custom Live Tester)
 	const handleReconcileItem = (item: DriftItem) => {
-		const { updatedTicket } = reconcileTicketDrift(currentScenario.ticket, [
-			item,
-		]);
+		const { updatedTicket } = reconcileTicketDrift(activeTicket, [item]);
+		if (isCustomMode) {
+			setCustomTicketDraft(ticketToCustomDraft(updatedTicket));
+			setActivePresetId(null);
+			return;
+		}
 		setScenariosState((prev) => ({
 			...prev,
 			[selectedScenarioId]: {
@@ -70,35 +169,39 @@ export default function App() {
 
 	const handleReconcileAll = () => {
 		const { updatedTicket } = reconcileTicketDrift(
-			currentScenario.ticket,
+			activeTicket,
 			auditResult.driftItems,
 		);
-		setScenariosState((prev) => ({
-			...prev,
-			[selectedScenarioId]: {
-				...prev[selectedScenarioId],
-				ticket: updatedTicket,
-			},
-		}));
+		if (isCustomMode) {
+			setCustomTicketDraft(ticketToCustomDraft(updatedTicket));
+			setActivePresetId(null);
+		} else {
+			setScenariosState((prev) => ({
+				...prev,
+				[selectedScenarioId]: {
+					...prev[selectedScenarioId],
+					ticket: updatedTicket,
+				},
+			}));
+		}
 
-		// Add Rovo response to chat
 		setChatMessages((prev) => [
 			...prev,
 			{
 				id: `msg-${Date.now()}-user`,
 				sender: "user",
-				text: "Rovo, reconcile all detected drift items for this ticket.",
+				text: `Rovo, reconcile all detected drift items for ${activeTicket.key}.`,
 				timestamp: new Date().toLocaleTimeString(),
 			},
 			{
 				id: `msg-${Date.now()}-rovo`,
 				sender: "rovo",
-				text: `Reconciliation completed successfully. Updated ${currentScenario.ticket.key} acceptance criteria and resolved ${auditResult.driftItems.length} gap(s).`,
+				text: `Reconciliation completed successfully. Updated ${activeTicket.key} acceptance criteria and resolved ${auditResult.driftItems.length} gap(s).`,
 				actionCall: {
 					name: "reconcile-ticket-action",
 					type: "MUTATING",
 					status: "EXECUTED",
-					output: `Patched ${currentScenario.ticket.key} with ${auditResult.driftItems.length} authoritative criteria.`,
+					output: `Patched ${activeTicket.key} with ${auditResult.driftItems.length} authoritative criteria.`,
 				},
 				timestamp: new Date().toLocaleTimeString(),
 			},
@@ -106,6 +209,16 @@ export default function App() {
 	};
 
 	const handleReset = () => {
+		if (isCustomMode) {
+			const fallbackPreset =
+				CUSTOM_TESTER_PRESETS.find((p) => p.id === activePresetId) ||
+				CUSTOM_TESTER_PRESETS[0];
+			setActivePresetId(fallbackPreset.id);
+			setCustomPrdDraft({ ...fallbackPreset.prd });
+			setCustomTicketDraft({ ...fallbackPreset.ticket });
+			return;
+		}
+
 		const original = SCENARIOS.find((s) => s.id === selectedScenarioId);
 		if (original) {
 			setScenariosState((prev) => ({
@@ -113,6 +226,37 @@ export default function App() {
 				[selectedScenarioId]: JSON.parse(JSON.stringify(original)),
 			}));
 		}
+	};
+
+	// Custom Live Tester Preset & Clear Handlers
+	const handleSelectPreset = (presetId: string) => {
+		const preset = CUSTOM_TESTER_PRESETS.find((p) => p.id === presetId);
+		if (!preset) return;
+		setActivePresetId(preset.id);
+		setCustomPrdDraft({ ...preset.prd });
+		setCustomTicketDraft({ ...preset.ticket });
+	};
+
+	const handleClearBlank = () => {
+		const today = new Date().toISOString().slice(0, 10);
+		setActivePresetId(null);
+		setCustomPrdDraft({
+			id: "CONF-CUSTOM-001",
+			title: "",
+			version: "v1.0",
+			author: "Custom Reviewer",
+			lastUpdated: today,
+			body: "",
+		});
+		setCustomTicketDraft({
+			key: "CUSTOM-101",
+			summary: "",
+			status: "In Progress",
+			assignee: "Unassigned",
+			updated: today,
+			acceptanceCriteriaText: "",
+			subtasksText: "",
+		});
 	};
 
 	const handleSendPrompt = (promptText?: string) => {
@@ -137,12 +281,12 @@ export default function App() {
 			rovoMsg = {
 				id: `msg-${Date.now()}-rovo`,
 				sender: "rovo",
-				text: `I ran 'audit-drift-action' against ${currentScenario.spec.id} and ${currentScenario.ticket.key}. Readiness score: ${auditResult.releaseReadinessScore}/100. Discrepancies found: ${auditResult.driftItems.length}.`,
+				text: `I ran 'audit-drift-action' against ${activeSpec.id} and ${activeTicket.key}. Readiness score: ${auditResult.releaseReadinessScore}/100. Discrepancies found: ${auditResult.driftItems.length}.`,
 				actionCall: {
 					name: "audit-drift-action",
 					type: "READ_ONLY",
 					status: "EXECUTED",
-					output: `Scanned 3 sections. Found ${auditResult.driftItems.length} drift items. Current Risk: ${auditResult.riskLevel}.`,
+					output: `Scanned ${activeSpec.sections.length} section(s). Found ${auditResult.driftItems.length} drift item(s). Current Risk: ${auditResult.riskLevel}.`,
 				},
 				timestamp: new Date().toLocaleTimeString(),
 			};
@@ -175,7 +319,7 @@ export default function App() {
 			rovoMsg = {
 				id: `msg-${Date.now()}-rovo`,
 				sender: "rovo",
-				text: `I understand you are asking about ${currentScenario.ticket.key}. Confluence spec ${currentScenario.spec.id} (${currentScenario.spec.version}) is the single source of truth. Try asking me to 'Audit spec drift' or 'Reconcile ticket criteria'.`,
+				text: `I understand you are asking about ${activeTicket.key}. Confluence spec ${activeSpec.id} (${activeSpec.version}) is the single source of truth. Try asking me to 'Audit spec drift' or 'Reconcile ticket criteria'.`,
 				timestamp: new Date().toLocaleTimeString(),
 			};
 		}
@@ -184,28 +328,55 @@ export default function App() {
 		setInputPrompt("");
 	};
 
-	const copyMarkdownReport = () => {
-		const md = [
-			`# DriftGuard AI — Release Drift Audit Report`,
-			`* **Generated:** ${new Date().toISOString()}`,
-			`* **Confluence Spec:** ${currentScenario.spec.id} (${currentScenario.spec.title} - ${currentScenario.spec.version})`,
-			`* **Jira Ticket:** ${currentScenario.ticket.key} (${currentScenario.ticket.summary})`,
-			`* **Readiness Score:** ${auditResult.releaseReadinessScore} / 100`,
-			`* **Risk Classification:** ${auditResult.riskLevel}`,
-			``,
-			`## Detected Drift Discrepancies (${auditResult.driftItems.length})`,
-			auditResult.driftItems
-				.map(
-					(d, i) =>
-						`### ${i + 1}. [${d.severity}] ${d.title}\n* **Category:** ${d.category}\n* **Spec Requirement:** ${d.specSnippet}\n* **Ticket Status:** ${d.ticketSnippet}\n* **Suggested Remediation:** \`${d.suggestedRemediation}\``,
-				)
-				.join("\n\n"),
-		].join("\n");
-
-		navigator.clipboard.writeText(md);
-		setCopiedReport(true);
-		setTimeout(() => setCopiedReport(false), 2500);
+	// Report Export Handlers (.md download, .json download, and quick clipboard copy)
+	const handleExportMarkdown = () => {
+		const md = createMarkdownAuditExport(
+			auditResult,
+			activeSpec,
+			activeTicket,
+			envStatus,
+		);
+		const filename = buildReportFilename(
+			activeTicket.key,
+			"md",
+			auditResult.timestamp,
+		);
+		downloadTextFile(md, filename, "text/markdown;charset=utf-8");
+		flashExportFeedback("md");
 	};
+
+	const handleExportJson = () => {
+		const json = createJsonAuditExport(
+			auditResult,
+			activeSpec,
+			activeTicket,
+			envStatus,
+		);
+		const filename = buildReportFilename(
+			activeTicket.key,
+			"json",
+			auditResult.timestamp,
+		);
+		downloadTextFile(json, filename, "application/json;charset=utf-8");
+		flashExportFeedback("json");
+	};
+
+	const handleCopyMarkdown = () => {
+		const md = createMarkdownAuditExport(
+			auditResult,
+			activeSpec,
+			activeTicket,
+			envStatus,
+		);
+		if (navigator.clipboard?.writeText) {
+			navigator.clipboard.writeText(md);
+		}
+		flashExportFeedback("copy");
+	};
+
+	const envTooltip = envStatus.isForge
+		? `Connected via @forge/bridge (${envStatus.context?.siteUrl || "Atlassian Cloud"})`
+		: "Running real DriftGuard Engine client-side; auto-upgrades to @forge/bridge inside Jira & Confluence Cloud.";
 
 	return (
 		<div
@@ -220,6 +391,8 @@ export default function App() {
 					display: "flex",
 					alignItems: "center",
 					justifyContent: "space-between",
+					flexWrap: "wrap",
+					gap: "12px",
 					borderBottom: "1px solid rgba(255,255,255,0.1)",
 				}}
 			>
@@ -251,19 +424,27 @@ export default function App() {
 							DriftGuard AI
 						</h1>
 						<span style={{ fontSize: "11px", color: "#b3bac5" }}>
-							Atlassian Forge • Rovo Autonomous Spec & Release Drift Auditor
+							Atlassian Forge • Rovo Autonomous Spec &amp; Release Drift Auditor
 						</span>
 					</div>
 				</div>
 
-				<div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: "14px",
+						flexWrap: "wrap",
+					}}
+				>
 					<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
 						<span style={{ fontSize: "12px", color: "#b3bac5" }}>
-							Interactive Scenario:
+							Active Workspace:
 						</span>
 						<select
+							aria-label="Select audit scenario or custom live tester"
 							value={selectedScenarioId}
-							onChange={(e) => setSelectedScenarioId(e.target.value)}
+							onChange={(e) => handleScenarioChange(e.target.value)}
 							style={{
 								background: "#091e42",
 								color: "#ffffff",
@@ -280,14 +461,26 @@ export default function App() {
 									{sc.name}
 								</option>
 							))}
+							<option value={CUSTOM_MODE_ID}>
+								Custom PRD &amp; Jira Ticket (Live Tester)
+							</option>
 						</select>
 					</div>
 
+					{/* Runtime Mode Badge: Live Forge Cloud vs Interactive Sandbox */}
 					<span
-						className="badge badge-info"
-						style={{ background: "rgba(0,101,255,0.2)", color: "#4c9aff" }}
+						data-testid="runtime-env-badge"
+						title={envTooltip}
+						className={`env-badge ${
+							envStatus.isForge ? "env-badge-forge" : "env-badge-sandbox"
+						}`}
 					>
-						Local Interactive Sandbox
+						<span
+							className={`env-dot ${
+								envStatus.isForge ? "env-dot-forge" : "env-dot-sandbox"
+							}`}
+						/>
+						{envStatus.isForge ? "Live Forge Cloud" : "Interactive Sandbox"}
 					</span>
 				</div>
 			</header>
@@ -332,6 +525,7 @@ export default function App() {
 									display: "flex",
 									alignItems: "center",
 									gap: "10px",
+									flexWrap: "wrap",
 									marginBottom: "4px",
 								}}
 							>
@@ -346,6 +540,9 @@ export default function App() {
 								>
 									{auditResult.riskLevel.replace(/_/g, " ")}
 								</span>
+								{isCustomMode && (
+									<span className="badge badge-info">CUSTOM LIVE INPUT</span>
+								)}
 								<span
 									style={{ fontSize: "13px", color: "var(--atlassian-subtle)" }}
 								>
@@ -361,7 +558,7 @@ export default function App() {
 									color: "var(--atlassian-slate)",
 								}}
 							>
-								{currentScenario.ticket.key}: {currentScenario.ticket.summary}
+								{activeTicket.key}: {activeTicket.summary}
 							</h2>
 							<p
 								style={{
@@ -419,6 +616,7 @@ export default function App() {
 							>
 								{auditResult.driftItems.length > 0 && (
 									<button
+										type="button"
 										onClick={handleReconcileAll}
 										className="btn btn-primary"
 									>
@@ -426,20 +624,39 @@ export default function App() {
 										{auditResult.driftItems.length})
 									</button>
 								)}
-								<div style={{ display: "flex", gap: "8px" }}>
+								<div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
 									<button
-										onClick={copyMarkdownReport}
-										className="btn btn-secondary"
-										style={{ fontSize: "12px" }}
+										type="button"
+										onClick={handleExportMarkdown}
+										className="btn btn-secondary btn-sm"
+										title="Download full Audit Report as Markdown (.md)"
 									>
-										{copiedReport ? "✓ Copied Markdown!" : "Export Report"}
+										{exportFeedback === "md" ? "✓ Saved .md" : "Export .md"}
 									</button>
 									<button
-										onClick={handleReset}
-										className="btn btn-secondary"
-										style={{ fontSize: "12px" }}
+										type="button"
+										onClick={handleExportJson}
+										className="btn btn-secondary btn-sm"
+										title="Download structured Audit Report as JSON (.json)"
 									>
-										Reset Scenario
+										{exportFeedback === "json"
+											? "✓ Saved .json"
+											: "Export .json"}
+									</button>
+									<button
+										type="button"
+										onClick={handleCopyMarkdown}
+										className="btn btn-secondary btn-sm"
+										title="Copy Markdown report to clipboard"
+									>
+										{exportFeedback === "copy" ? "✓ Copied!" : "Copy .md"}
+									</button>
+									<button
+										type="button"
+										onClick={handleReset}
+										className="btn btn-secondary btn-sm"
+									>
+										{isCustomMode ? "Reset Preset" : "Reset Scenario"}
 									</button>
 								</div>
 							</div>
@@ -454,10 +671,12 @@ export default function App() {
 						gap: "4px",
 						borderBottom: "1px solid var(--atlassian-border)",
 						marginBottom: "20px",
+						overflowX: "auto",
 					}}
 				>
 					<button
-						onClick={() => setActiveTab("matrix")}
+						type="button"
+						onClick={() => handleSelectTab("matrix")}
 						style={{
 							padding: "10px 18px",
 							fontSize: "13px",
@@ -473,12 +692,14 @@ export default function App() {
 									? "var(--atlassian-blue)"
 									: "var(--atlassian-subtle)",
 							cursor: "pointer",
+							whiteSpace: "nowrap",
 						}}
 					>
 						Drift Analysis Matrix ({auditResult.driftItems.length})
 					</button>
 					<button
-						onClick={() => setActiveTab("context")}
+						type="button"
+						onClick={() => handleSelectTab("context")}
 						style={{
 							padding: "10px 18px",
 							fontSize: "13px",
@@ -494,12 +715,14 @@ export default function App() {
 									? "var(--atlassian-blue)"
 									: "var(--atlassian-subtle)",
 							cursor: "pointer",
+							whiteSpace: "nowrap",
 						}}
 					>
 						Teamwork Graph: Spec vs Ticket Diff
 					</button>
 					<button
-						onClick={() => setActiveTab("rovo")}
+						type="button"
+						onClick={() => handleSelectTab("rovo")}
 						style={{
 							padding: "10px 18px",
 							fontSize: "13px",
@@ -515,9 +738,31 @@ export default function App() {
 									? "var(--atlassian-blue)"
 									: "var(--atlassian-subtle)",
 							cursor: "pointer",
+							whiteSpace: "nowrap",
 						}}
 					>
 						Rovo Autonomous Agent Simulator
+					</button>
+					<button
+						type="button"
+						onClick={() => handleSelectTab("tester")}
+						style={{
+							padding: "10px 18px",
+							fontSize: "13px",
+							fontWeight: 700,
+							border: "none",
+							background: activeTab === "tester" ? "var(--info-bg)" : "none",
+							borderRadius: "4px 4px 0 0",
+							borderBottom:
+								activeTab === "tester"
+									? "2px solid var(--atlassian-blue)"
+									: "2px solid transparent",
+							color: "var(--atlassian-blue)",
+							cursor: "pointer",
+							whiteSpace: "nowrap",
+						}}
+					>
+						Custom PRD &amp; Ticket Live Tester
 					</button>
 				</div>
 
@@ -529,7 +774,7 @@ export default function App() {
 								className="card"
 								style={{ padding: "48px 24px", textAlign: "center" }}
 							>
-								<div style={{ fontSize: "40px", marginBottom: "12px" }}>🎉</div>
+								<div style={{ fontSize: "40px", marginBottom: "12px" }}>✓</div>
 								<h3
 									style={{
 										fontSize: "18px",
@@ -615,6 +860,7 @@ export default function App() {
 											</div>
 
 											<button
+												type="button"
 												onClick={() => handleReconcileItem(item)}
 												className="btn btn-secondary"
 												style={{ fontSize: "12px", whiteSpace: "nowrap" }}
@@ -654,7 +900,7 @@ export default function App() {
 														marginBottom: "4px",
 													}}
 												>
-													📄 Confluence Authority ({item.specReference}):
+													Confluence Authority ({item.specReference}):
 												</div>
 												<code
 													style={{
@@ -677,7 +923,7 @@ export default function App() {
 														marginBottom: "4px",
 													}}
 												>
-													🎫 Jira Reality ({item.ticketReference}):
+													Jira Reality ({item.ticketReference}):
 												</div>
 												<code
 													style={{
@@ -715,13 +961,7 @@ export default function App() {
 
 				{/* Tab Content 2: Teamwork Graph Spec vs Ticket Diff */}
 				{activeTab === "context" && (
-					<div
-						style={{
-							display: "grid",
-							gridTemplateColumns: "1fr 1fr",
-							gap: "20px",
-						}}
-					>
+					<div className="tester-grid">
 						{/* Left: Confluence Spec */}
 						<div className="card" style={{ padding: "20px" }}>
 							<div
@@ -742,7 +982,7 @@ export default function App() {
 										CONFLUENCE SPECIFICATION
 									</span>
 									<h3 style={{ fontSize: "16px", fontWeight: 700 }}>
-										{currentScenario.spec.title}
+										{activeSpec.title}
 									</h3>
 									<span
 										style={{
@@ -750,8 +990,8 @@ export default function App() {
 											color: "var(--atlassian-subtle)",
 										}}
 									>
-										{currentScenario.spec.id} • {currentScenario.spec.version} •
-										by {currentScenario.spec.author}
+										{activeSpec.id} • {activeSpec.version} • by{" "}
+										{activeSpec.author}
 									</span>
 								</div>
 							</div>
@@ -763,7 +1003,7 @@ export default function App() {
 									gap: "16px",
 								}}
 							>
-								{currentScenario.spec.sections.map((sec) => (
+								{activeSpec.sections.map((sec) => (
 									<div
 										key={sec.id}
 										style={{
@@ -787,6 +1027,7 @@ export default function App() {
 												fontSize: "12px",
 												marginBottom: "8px",
 												color: "var(--atlassian-slate)",
+												whiteSpace: "pre-line",
 											}}
 										>
 											{sec.content}
@@ -844,8 +1085,7 @@ export default function App() {
 										JIRA SOFTWARE TICKET
 									</span>
 									<h3 style={{ fontSize: "16px", fontWeight: 700 }}>
-										{currentScenario.ticket.key}:{" "}
-										{currentScenario.ticket.summary}
+										{activeTicket.key}: {activeTicket.summary}
 									</h3>
 									<span
 										style={{
@@ -853,8 +1093,8 @@ export default function App() {
 											color: "var(--atlassian-subtle)",
 										}}
 									>
-										Assignee: {currentScenario.ticket.assignee} • Status:{" "}
-										<strong>{currentScenario.ticket.status}</strong>
+										Assignee: {activeTicket.assignee} • Status:{" "}
+										<strong>{activeTicket.status}</strong>
 									</span>
 								</div>
 							</div>
@@ -868,7 +1108,7 @@ export default function App() {
 									}}
 								>
 									Current Acceptance Criteria (
-									{currentScenario.ticket.acceptanceCriteria.length}):
+									{activeTicket.acceptanceCriteria.length}):
 								</h5>
 								<div
 									style={{
@@ -878,7 +1118,7 @@ export default function App() {
 										marginBottom: "16px",
 									}}
 								>
-									{currentScenario.ticket.acceptanceCriteria.map((ac, aci) => (
+									{activeTicket.acceptanceCriteria.map((ac, aci) => (
 										<div
 											key={aci}
 											style={{
@@ -906,7 +1146,7 @@ export default function App() {
 										marginBottom: "8px",
 									}}
 								>
-									Linked Subtasks ({currentScenario.ticket.subtasks.length}):
+									Linked Subtasks ({activeTicket.subtasks.length}):
 								</h5>
 								<ul
 									style={{
@@ -917,7 +1157,7 @@ export default function App() {
 										gap: "4px",
 									}}
 								>
-									{currentScenario.ticket.subtasks.map((st, sti) => (
+									{activeTicket.subtasks.map((st, sti) => (
 										<li key={sti} style={{ color: "var(--atlassian-subtle)" }}>
 											{st}
 										</li>
@@ -946,6 +1186,8 @@ export default function App() {
 								display: "flex",
 								alignItems: "center",
 								justifyContent: "space-between",
+								flexWrap: "wrap",
+								gap: "10px",
 								background: "var(--atlassian-bg-subtle)",
 							}}
 						>
@@ -988,6 +1230,7 @@ export default function App() {
 
 							<div style={{ display: "flex", gap: "8px" }}>
 								<button
+									type="button"
 									onClick={() =>
 										handleSendPrompt(
 											"Audit current issue against Confluence spec",
@@ -999,6 +1242,7 @@ export default function App() {
 									Run Audit
 								</button>
 								<button
+									type="button"
 									onClick={() =>
 										handleSendPrompt("Reconcile ticket criteria now")
 									}
@@ -1008,6 +1252,7 @@ export default function App() {
 									Reconcile Ticket
 								</button>
 								<button
+									type="button"
 									onClick={() =>
 										handleSendPrompt("What is the release readiness score?")
 									}
@@ -1152,6 +1397,30 @@ export default function App() {
 							</button>
 						</form>
 					</div>
+				)}
+
+				{/* Tab Content 4: Custom PRD & Jira Ticket Live Tester */}
+				{activeTab === "tester" && (
+					<CustomLiveTester
+						prdDraft={customPrdDraft}
+						ticketDraft={customTicketDraft}
+						activePresetId={activePresetId}
+						auditResult={auditResult}
+						onChangePrd={(next) => {
+							setActivePresetId(null);
+							setCustomPrdDraft(next);
+						}}
+						onChangeTicket={(next) => {
+							setActivePresetId(null);
+							setCustomTicketDraft(next);
+						}}
+						onSelectPreset={handleSelectPreset}
+						onClearBlank={handleClearBlank}
+						onReconcileItem={handleReconcileItem}
+						onReconcileAll={handleReconcileAll}
+						onExportMarkdown={handleExportMarkdown}
+						onExportJson={handleExportJson}
+					/>
 				)}
 			</div>
 		</div>

@@ -1,4 +1,12 @@
 import {
+	applyJiraReconciliation,
+	checkAtlassianClientMode,
+	fetchConfluenceSpec,
+	fetchJiraIssue,
+	getAuditHistory,
+	recordAuditHistory,
+} from "./atlassianClient";
+import {
 	auditSpecTicketDrift,
 	calculateAdjustedScore,
 	reconcileTicketDrift,
@@ -45,8 +53,25 @@ export async function auditDriftHandler(payload: {
 	specId?: string;
 	ticketKey?: string;
 }): Promise<AuditResult> {
-	const scenario = getScenario(payload.scenarioId);
-	const result = auditSpecTicketDrift(scenario.spec, scenario.ticket);
+	let spec = getScenario(payload.scenarioId).spec;
+	let ticket = getScenario(payload.scenarioId).ticket;
+
+	// In Live Forge or when explicit IDs are requested, attempt fetching via Atlassian Client
+	if (payload.ticketKey) {
+		const fetched = await fetchJiraIssue(payload.ticketKey, payload.scenarioId);
+		ticket = fetched.ticket;
+	}
+
+	if (payload.specId) {
+		const fetchedSpec = await fetchConfluenceSpec(
+			payload.specId,
+			payload.scenarioId,
+		);
+		spec = fetchedSpec.spec;
+	}
+
+	const result = auditSpecTicketDrift(spec, ticket);
+	await recordAuditHistory(result);
 	return result;
 }
 
@@ -78,6 +103,17 @@ export async function reconcileTicketHandler(
 		auditBefore.releaseReadinessScore,
 		itemsToReconcile,
 	);
+
+	// Live Atlassian Cloud synchronization
+	await applyJiraReconciliation(
+		scenario.ticket.key,
+		appliedRemediations,
+		newScore,
+	);
+
+	// Record audit history
+	const auditAfter = auditSpecTicketDrift(scenario.spec, scenario.ticket);
+	await recordAuditHistory(auditAfter);
 
 	return {
 		success: true,
@@ -143,6 +179,10 @@ export async function resolverHandler(req: {
 			return await reconcileTicketHandler(payload);
 		case "generateReleaseScore":
 			return await generateReleaseScoreHandler(payload);
+		case "getClientMode":
+			return await checkAtlassianClientMode();
+		case "getAuditHistory":
+			return await getAuditHistory(payload.ticketKey);
 		default:
 			return { error: `Unknown resolver functionKey: ${fnKey}` };
 	}

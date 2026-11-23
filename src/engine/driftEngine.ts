@@ -1,5 +1,6 @@
 import type {
 	AuditResult,
+	CustomScenarioInput,
 	DriftCategory,
 	DriftItem,
 	DriftSeverity,
@@ -307,4 +308,127 @@ export function calculateAdjustedScore(
 	}
 
 	return { newScore, newRiskLevel };
+}
+
+export function createCustomScenario(input: CustomScenarioInput): {
+	spec: SpecDocument;
+	ticket: JiraTicket;
+} {
+	const specRequirements =
+		input.specRequirements && input.specRequirements.length > 0
+			? input.specRequirements
+			: input.specContent
+					.split("\n")
+					.map((line) => line.trim())
+					.filter(
+						(line) =>
+							line.startsWith("-") ||
+							line.startsWith("*") ||
+							/^\d+\./.test(line),
+					)
+					.map((line) => line.replace(/^[-*\d.]+\s*/, ""));
+
+	const spec: SpecDocument = {
+		id: input.specId || "CONF-CUSTOM-001",
+		title: input.specTitle || "Custom PRD Specification",
+		version: "v1.0",
+		lastUpdated: new Date().toISOString(),
+		author: "Architect (Custom)",
+		sections: [
+			{
+				id: "sec-custom-1",
+				title: "Requirements & Specifications",
+				content: input.specContent,
+				requirements:
+					specRequirements.length > 0 ? specRequirements : [input.specContent],
+			},
+		],
+	};
+
+	const ticket: JiraTicket = {
+		key: input.ticketKey || "CUSTOM-101",
+		summary: input.ticketSummary || "Custom Feature Implementation",
+		status: input.ticketStatus || "In Progress",
+		assignee: input.ticketAssignee || "Engineer (Custom)",
+		updated: new Date().toISOString(),
+		acceptanceCriteria: input.acceptanceCriteria,
+		subtasks: input.subtasks || ["Initial scoping and verification"],
+	};
+
+	return { spec, ticket };
+}
+
+export function auditCustomScenario(input: CustomScenarioInput): {
+	spec: SpecDocument;
+	ticket: JiraTicket;
+	auditResult: AuditResult;
+} {
+	const { spec, ticket } = createCustomScenario(input);
+	const auditResult = auditSpecTicketDrift(spec, ticket);
+	return { spec, ticket, auditResult };
+}
+
+export function generateMarkdownReport(
+	auditResult: AuditResult,
+	spec: SpecDocument,
+	ticket: JiraTicket,
+): string {
+	return [
+		`# DriftGuard AI — Release Drift Audit Report`,
+		`* **Generated:** ${auditResult.timestamp}`,
+		`* **Confluence Spec:** ${spec.id} (${spec.title} - ${spec.version})`,
+		`* **Jira Ticket:** ${ticket.key} (${ticket.summary})`,
+		`* **Readiness Score:** ${auditResult.releaseReadinessScore} / 100`,
+		`* **Risk Classification:** ${auditResult.riskLevel}`,
+		``,
+		`## Executive Summary`,
+		`${auditResult.summary}`,
+		``,
+		`## Detected Drift Discrepancies (${auditResult.driftItems.length})`,
+		auditResult.driftItems.length === 0
+			? `* No spec drift detected. Ticket criteria are fully aligned with Confluence.`
+			: auditResult.driftItems
+					.map(
+						(d, i) =>
+							`### ${i + 1}. [${d.severity}] ${d.title}\n* **Category:** ${d.category}\n* **Spec Requirement:** ${d.specSnippet}\n* **Ticket Status:** ${d.ticketSnippet}\n* **Root Cause:** ${d.rootCause}\n* **Suggested Remediation:** \`${d.suggestedRemediation}\``,
+					)
+					.join("\n\n"),
+	].join("\n");
+}
+
+export function generateJsonReport(
+	auditResult: AuditResult,
+	spec: SpecDocument,
+	ticket: JiraTicket,
+): string {
+	return JSON.stringify(
+		{
+			reportType: "DRIFTGUARD_RELEASE_AUDIT_REPORT",
+			version: "1.0.0",
+			generatedAt: auditResult.timestamp,
+			spec: {
+				id: spec.id,
+				title: spec.title,
+				version: spec.version,
+				lastUpdated: spec.lastUpdated,
+				author: spec.author,
+			},
+			ticket: {
+				key: ticket.key,
+				summary: ticket.summary,
+				status: ticket.status,
+				assignee: ticket.assignee,
+				updated: ticket.updated,
+			},
+			audit: {
+				releaseReadinessScore: auditResult.releaseReadinessScore,
+				riskLevel: auditResult.riskLevel,
+				summary: auditResult.summary,
+				discrepanciesCount: auditResult.driftItems.length,
+				driftItems: auditResult.driftItems,
+			},
+		},
+		null,
+		2,
+	);
 }
