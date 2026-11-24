@@ -3,7 +3,7 @@
 [![Atlassian Forge](https://img.shields.io/badge/Atlassian-Forge%20v10.0-0052CC?logo=atlassian&logoColor=white)](https://developer.atlassian.com/platform/forge/)
 [![Rovo Agent](https://img.shields.io/badge/Atlassian-Rovo%20Agent-0065FF?logo=atlassian&logoColor=white)](https://www.atlassian.com/software/rovo)
 [![Codegeist 2026](https://img.shields.io/badge/Codegeist-2026%20Entry-FF8B00)](https://codegeist.devpost.com/)
-[![Build & Tests](https://img.shields.io/badge/Tests-12%2F12%20PASS-00875A)](https://vitest.dev/)
+[![Build & Tests](https://img.shields.io/badge/Tests-19%2F19%20PASS%20(Node%2022)-00875A)](https://vitest.dev/)
 
 > **Codegeist 2026 Hackathon Entry**  
 > **Track:** Apps for Software Teams ($15,000 Main Prize)  
