@@ -1,3 +1,7 @@
+<p align="left">
+  <img src="public/icon.png" alt="DriftGuard AI App Icon" width="72" height="72" />
+</p>
+
 # DriftGuard AI: Rovo Autonomous Spec & Release Drift Auditor
 
 [![Atlassian Forge](https://img.shields.io/badge/Atlassian-Forge%20v10.0-0052CC?logo=atlassian&logoColor=white)](https://developer.atlassian.com/platform/forge/)
